@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+
+# System update script with GlobalProtect-openconnect support
+# Handles: apt update/upgrade, local .deb installs, GlobalProtect updates, cleanup
+
+set -o pipefail
+
+# Color codes
+readonly CYAN="\e[36m"
+readonly GREEN="\e[32m"
+readonly RED="\e[31m"
+readonly RESET="\e[0m"
+
+print_header() {
+    echo -e "${CYAN}## $1 ##${RESET}"
+}
+
+print_success() {
+    echo -e "${GREEN}✓ $1${RESET}"
+}
+
+print_error() {
+    echo -e "${RED}✗ $1${RESET}"
+}
+
+main() {
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${CYAN}    System Update Script${RESET}"
+    echo -e "${CYAN}    • apt update & upgrade"
+    echo -e "    • Local .deb packages"
+    echo -e "    • GlobalProtect-openconnect"
+    echo -e "    • Zoom & Discord"
+    echo -e "    • Cleanup unused packages${RESET}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo
+
+    sudo -v || {
+        print_error "Failed to get sudo privileges"
+        return 1
+    }
+
+    print_header "Update"
+    sudo apt update || {
+        print_error "apt update failed"
+        return 1
+    }
+
+    print_header "Upgrade"
+    sudo apt upgrade || {
+        print_error "apt upgrade failed"
+        return 1
+    }
+
+    print_header "Install local .deb packages"
+    local deb_count=$(ls ~/Downloads/*.deb 2>/dev/null | wc -l)
+    if [ "$deb_count" -gt 0 ]; then
+        for deb_file in ~/Downloads/*.deb; do
+            if [ -f "$deb_file" ]; then
+                echo "Installing: $(basename "$deb_file")"
+                sudo apt install -y "$deb_file" && rm "$deb_file" || {
+                    print_error "Failed to install $(basename "$deb_file")"
+                }
+            fi
+        done
+        print_success "Installed $deb_count package(s)"
+    else
+        echo "No .deb packages found in ~/Downloads"
+    fi
+
+    print_header "Update GlobalProtect-openconnect"
+    local gp_repo="yuezk/GlobalProtect-openconnect"
+    local current_version=""
+    local latest_version=""
+
+    if command -v gpclient &> /dev/null; then
+        current_version=$(gpclient --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)
+        echo "Current version: ${current_version:-unknown}"
+    else
+        echo "GlobalProtect-openconnect not installed"
+    fi
+
+    echo "Checking for latest release..."
+    latest_version=$(curl -sL "https://api.github.com/repos/$gp_repo/releases/latest" | grep -oP '"tag_name": *"\K[^"]+')
+
+    if [ -z "$latest_version" ]; then
+        print_error "Failed to fetch latest version from GitHub"
+    elif [ -z "$current_version" ] || [ "v$current_version" != "$latest_version" ]; then
+        echo "Latest version: $latest_version"
+        echo "Downloading GlobalProtect-openconnect..."
+
+        local temp_dir=$(mktemp -d)
+        cd "$temp_dir" || return 1
+
+        local base_url="https://github.com/$gp_repo/releases/download/$latest_version"
+        local deb_files=(
+            "globalprotect-openconnect_${latest_version#v}_amd64.deb"
+        )
+
+        local download_failed=false
+        for deb in "${deb_files[@]}"; do
+            if curl -sLO "$base_url/$deb"; then
+                echo "Downloaded: $deb"
+            else
+                print_error "Failed to download: $deb"
+                download_failed=true
+            fi
+        done
+
+        if [ "$download_failed" = false ]; then
+            for deb in *.deb; do
+                if [ -f "$deb" ]; then
+                    sudo apt install -y "$deb" || {
+                        print_error "Failed to install $deb"
+                    }
+                fi
+            done
+            print_success "GlobalProtect-openconnect updated to $latest_version"
+        fi
+
+        cd - > /dev/null
+        rm -rf "$temp_dir"
+    else
+        print_success "GlobalProtect-openconnect is up to date ($latest_version)"
+    fi
+
+    print_header "Update Zoom"
+    local zoom_current=""
+    local zoom_latest=""
+
+    if [ -f /opt/zoom/version.txt ]; then
+        zoom_current=$(cat /opt/zoom/version.txt 2>/dev/null)
+        echo "Current version: ${zoom_current}"
+    elif dpkg -s zoom &> /dev/null; then
+        zoom_current=$(dpkg -s zoom 2>/dev/null | grep '^Version:' | awk '{print $2}')
+        echo "Current version: ${zoom_current}"
+    else
+        echo "Zoom not installed"
+    fi
+
+    echo "Checking for latest release..."
+    zoom_latest=$(curl -sL "https://zoom.us/rest/download?os=linux" | docker run --rm -i ghcr.io/jqlang/jq -r '.result.downloadVO.zoom.version' 2>/dev/null)
+
+    if [ -z "$zoom_latest" ]; then
+        print_error "Failed to fetch latest version from Zoom API"
+    elif [ -z "$zoom_current" ] || [ "$zoom_current" != "$zoom_latest" ]; then
+        echo "Latest version: $zoom_latest"
+        echo "Downloading Zoom..."
+
+        local temp_dir=$(mktemp -d)
+        cd "$temp_dir" || return 1
+
+        if curl -sLO "https://zoom.us/client/latest/zoom_amd64.deb"; then
+            echo "Downloaded: zoom_amd64.deb"
+            sudo apt install -y ./zoom_amd64.deb && {
+                print_success "Zoom updated to $zoom_latest"
+            } || {
+                print_error "Failed to install Zoom"
+            }
+        else
+            print_error "Failed to download Zoom"
+        fi
+
+        cd - > /dev/null
+        rm -rf "$temp_dir"
+    else
+        print_success "Zoom is up to date ($zoom_latest)"
+    fi
+
+    print_header "Update Discord"
+    local discord_current=""
+    local discord_latest=""
+
+    if dpkg -s discord &> /dev/null; then
+        discord_current=$(dpkg -s discord 2>/dev/null | grep '^Version:' | awk '{print $2}')
+        echo "Current version: ${discord_current}"
+    else
+        echo "Discord not installed"
+    fi
+
+    echo "Checking for latest release..."
+    discord_latest=$(curl -sL "https://discord.com/api/updates/stable?platform=linux" | docker run --rm -i ghcr.io/jqlang/jq -r '.name' 2>/dev/null)
+
+    if [ -z "$discord_latest" ]; then
+        print_error "Failed to fetch latest version from Discord API"
+    elif [ -z "$discord_current" ] || [ "$discord_current" != "$discord_latest" ]; then
+        echo "Latest version: $discord_latest"
+        echo "Downloading Discord..."
+
+        local temp_dir=$(mktemp -d)
+        cd "$temp_dir" || return 1
+
+        local discord_deb="discord-${discord_latest}.deb"
+        if curl -sL "https://discord.com/api/download?platform=linux&format=deb" -o "$discord_deb"; then
+            echo "Downloaded: $discord_deb"
+            sudo apt install -y "./$discord_deb" && {
+                print_success "Discord updated to $discord_latest"
+            } || {
+                print_error "Failed to install Discord"
+            }
+        else
+            print_error "Failed to download Discord"
+        fi
+
+        cd - > /dev/null
+        rm -rf "$temp_dir"
+    else
+        print_success "Discord is up to date ($discord_latest)"
+    fi
+
+    print_header "Remove unused packages"
+    sudo apt autoremove -y
+
+    print_success "System update complete!"
+}
+
+main "$@"

@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+
+# Fedora system update script
+# Handles: dnf upgrade, local .rpm installs, GlobalProtect updates, Zoom, cleanup
+
+set -o pipefail
+
+readonly CYAN="\e[36m"
+readonly GREEN="\e[32m"
+readonly RED="\e[31m"
+readonly RESET="\e[0m"
+
+print_header() { echo -e "${CYAN}## $1 ##${RESET}"; }
+print_success() { echo -e "${GREEN}✓ $1${RESET}"; }
+print_error() { echo -e "${RED}✗ $1${RESET}"; }
+
+main() {
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${CYAN}    System Update Script (Fedora)${RESET}"
+    echo -e "${CYAN}    • dnf upgrade"
+    echo -e "    • Local .rpm packages"
+    echo -e "    • GlobalProtect-openconnect"
+    echo -e "    • Zoom"
+    echo -e "    • Cleanup${RESET}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo
+
+    sudo -v || { print_error "Failed to get sudo privileges"; return 1; }
+
+    print_header "Upgrade"
+    sudo dnf upgrade --refresh -y || { print_error "dnf upgrade failed"; return 1; }
+
+    print_header "Install local .rpm packages"
+    local rpm_count=$(ls ~/Downloads/*.rpm 2>/dev/null | wc -l)
+    if [ "$rpm_count" -gt 0 ]; then
+        for rpm_file in ~/Downloads/*.rpm; do
+            if [ -f "$rpm_file" ]; then
+                echo "Installing: $(basename "$rpm_file")"
+                sudo dnf install -y "$rpm_file" && rm "$rpm_file" || {
+                    print_error "Failed to install $(basename "$rpm_file")"
+                }
+            fi
+        done
+        print_success "Installed $rpm_count package(s)"
+    else
+        echo "No .rpm packages found in ~/Downloads"
+    fi
+
+    print_header "Update GlobalProtect-openconnect"
+    local gp_repo="yuezk/GlobalProtect-openconnect"
+    local current_version=""
+    local latest_version=""
+
+    if command -v gpclient &> /dev/null; then
+        current_version=$(gpclient --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)
+        echo "Current version: ${current_version:-unknown}"
+    else
+        echo "GlobalProtect-openconnect not installed"
+    fi
+
+    echo "Checking for latest release..."
+    latest_version=$(curl -sL "https://api.github.com/repos/$gp_repo/releases/latest" | grep -oP '"tag_name": *"\K[^"]+')
+
+    if [ -z "$latest_version" ]; then
+        print_error "Failed to fetch latest version from GitHub"
+    elif [ -z "$current_version" ] || [ "v$current_version" != "$latest_version" ]; then
+        echo "Latest version: $latest_version"
+        echo "Downloading GlobalProtect-openconnect..."
+
+        local temp_dir=$(mktemp -d)
+        cd "$temp_dir" || return 1
+
+        local base_url="https://github.com/$gp_repo/releases/download/$latest_version"
+        local rpm="globalprotect-openconnect-${latest_version#v}-1.x86_64.rpm"
+
+        if curl -sLO "$base_url/$rpm"; then
+            echo "Downloaded: $rpm"
+            sudo dnf install -y "./$rpm" && print_success "GlobalProtect-openconnect updated to $latest_version" || \
+                print_error "Failed to install $rpm"
+        else
+            print_error "Failed to download: $rpm"
+        fi
+
+        cd - > /dev/null
+        rm -rf "$temp_dir"
+    else
+        print_success "GlobalProtect-openconnect is up to date ($latest_version)"
+    fi
+
+    print_header "Update Zoom"
+    local zoom_current=""
+    local zoom_latest=""
+
+    if [ -f /opt/zoom/version.txt ]; then
+        zoom_current=$(cat /opt/zoom/version.txt 2>/dev/null)
+        echo "Current version: ${zoom_current}"
+    elif rpm -q zoom &> /dev/null; then
+        zoom_current=$(rpm -q --qf '%{VERSION}' zoom 2>/dev/null)
+        echo "Current version: ${zoom_current}"
+    else
+        echo "Zoom not installed"
+    fi
+
+    echo "Checking for latest release..."
+    zoom_latest=$(curl -sL "https://zoom.us/rest/download?os=linux" | jq -r '.result.downloadVO.zoom.version' 2>/dev/null)
+
+    if [ -z "$zoom_latest" ] || [ "$zoom_latest" = "null" ]; then
+        print_error "Failed to fetch latest version from Zoom API"
+    elif [ -z "$zoom_current" ] || [ "$zoom_current" != "$zoom_latest" ]; then
+        echo "Latest version: $zoom_latest"
+        echo "Downloading Zoom..."
+
+        local temp_dir=$(mktemp -d)
+        cd "$temp_dir" || return 1
+
+        if curl -sLO "https://zoom.us/client/latest/zoom_x86_64.rpm"; then
+            echo "Downloaded: zoom_x86_64.rpm"
+            sudo dnf install -y ./zoom_x86_64.rpm && print_success "Zoom updated to $zoom_latest" || \
+                print_error "Failed to install Zoom"
+        else
+            print_error "Failed to download Zoom"
+        fi
+
+        cd - > /dev/null
+        rm -rf "$temp_dir"
+    else
+        print_success "Zoom is up to date ($zoom_latest)"
+    fi
+
+    print_header "Remove unused packages"
+    sudo dnf autoremove -y
+
+    print_success "System update complete!"
+}
+
+main "$@"

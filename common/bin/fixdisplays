@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Apply the best monitor config via Mutter's DBus interface.
+
+Rules:
+  - Any external present -> disable the builtin (eDP), enable each external at
+    its highest (width*height, refresh) mode, side by side left-to-right by
+    connector name. First external is primary.
+  - No external -> enable the builtin at its best mode.
+"""
+
+import json
+import os
+import sys
+import time
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+NAME = "org.gnome.Mutter.DisplayConfig"
+PATH = "/org/gnome/Mutter/DisplayConfig"
+IFACE = "org.gnome.Mutter.DisplayConfig"
+
+METHOD_TEMPORARY = 1
+METHOD_PERSISTENT = 2
+
+# Same-target reapplies within this window trigger the confirmation prompt
+# (PERSISTENT) so the user can lock in a config that's been flapping. Fresh
+# targets always apply silently (TEMPORARY).
+CONFIRM_WINDOW_SEC = 3600
+HISTORY_PATH = os.path.expanduser("~/.cache/fixdisplays/history.json")
+
+
+def proxy():
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    return Gio.DBusProxy.new_sync(
+        bus, Gio.DBusProxyFlags.NONE, None, NAME, PATH, IFACE, None
+    )
+
+
+def get_current_state(p):
+    return p.call_sync(
+        "GetCurrentState", None, Gio.DBusCallFlags.NONE, -1, None
+    ).unpack()
+
+
+def best_mode(modes):
+    """Pick the panel's native resolution, then the highest refresh within it.
+
+    mode tuple: (id, w, h, refresh, preferred_scale, supported_scales, props)
+    The mode marked `is-preferred` is the EDID-declared native mode. Picking
+    max(w*h) alone is wrong on ultrawides: a 3840x2160 mode has more pixels
+    than a native 5120x1440 but isn't what the panel actually is.
+    """
+    preferred = next(
+        ((m[1], m[2]) for m in modes if m[6].get("is-preferred")),
+        None,
+    )
+    if preferred is not None:
+        candidates = [m for m in modes if (m[1], m[2]) == preferred]
+    else:
+        max_pixels = max(m[1] * m[2] for m in modes)
+        candidates = [m for m in modes if m[1] * m[2] == max_pixels]
+    return max(candidates, key=lambda m: m[3])
+
+
+def build_plan(monitors):
+    externals, builtin = [], None
+    for (spec, modes, mprops) in monitors:
+        connector = spec[0]
+        entry = (connector, modes)
+        if mprops.get("is-builtin"):
+            builtin = entry
+        else:
+            externals.append(entry)
+
+    logicals = []
+    log_lines = []
+    if externals:
+        externals.sort(key=lambda e: e[0])
+        x = 0
+        for i, (connector, modes) in enumerate(externals):
+            m = best_mode(modes)
+            mode_id, w, h, refresh = m[0], m[1], m[2], m[3]
+            primary = (i == 0)
+            logicals.append((x, 0, 1.0, 0, primary, [(connector, mode_id, {})]))
+            log_lines.append(
+                f"enable  {connector} @ {w}x{h}@{refresh:.2f}"
+                f"{' (primary)' if primary else ''}"
+            )
+            x += w
+        if builtin:
+            log_lines.append(f"disable {builtin[0]} (builtin)")
+    elif builtin:
+        connector, modes = builtin
+        m = best_mode(modes)
+        mode_id, w, h, refresh = m[0], m[1], m[2], m[3]
+        logicals.append((0, 0, 1.0, 0, True, [(connector, mode_id, {})]))
+        log_lines.append(
+            f"enable  {connector} @ {w}x{h}@{refresh:.2f} (builtin, primary)"
+        )
+    return logicals, log_lines
+
+
+def apply(p, serial, logicals, method):
+    args = GLib.Variant(
+        "(uua(iiduba(ssa{sv}))a{sv})",
+        (serial, method, logicals, {}),
+    )
+    p.call_sync("ApplyMonitorsConfig", args, Gio.DBusCallFlags.NONE, -1, None)
+
+
+def target_key(logicals):
+    """Stable key for a plan: sorted connector -> (x, y, mode_id) tuples."""
+    parts = []
+    for x, y, _scale, _transform, _primary, mons in logicals:
+        for connector, mode_id, _ in mons:
+            parts.append((connector, x, y, mode_id))
+    parts.sort()
+    return "|".join(f"{c}@{mid}:{x},{y}" for c, x, y, mid in parts)
+
+
+def load_history():
+    try:
+        with open(HISTORY_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_history(hist):
+    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+    tmp = HISTORY_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(hist, f)
+    os.replace(tmp, HISTORY_PATH)
+
+
+def choose_method(key, now, hist):
+    """PERSISTENT if we applied this same target within the window, else TEMPORARY."""
+    last = hist.get(key)
+    if last is not None and (now - last) <= CONFIRM_WINDOW_SEC:
+        return METHOD_PERSISTENT, "persistent (repeat within window)"
+    return METHOD_TEMPORARY, "temporary (first apply)"
+
+
+def current_mode_ids(monitors):
+    """Map connector -> currently-active mode id (or None if off)."""
+    out = {}
+    for (spec, modes, _mprops) in monitors:
+        connector = spec[0]
+        current = None
+        for m in modes:
+            mprops = m[6]
+            if mprops.get("is-current"):
+                current = m[0]
+                break
+        out[connector] = current
+    return out
+
+
+def matches_current(logicals, current_logical, cur_modes):
+    """True if the current state already matches the plan.
+
+    Enabled monitors must be at the planned mode and position; every other
+    known connector must be off.
+    """
+    plan = {}
+    for x, y, scale, transform, primary, mons in logicals:
+        for connector, mode_id, _ in mons:
+            plan[connector] = (x, y, mode_id)
+
+    active = {}
+    for entry in current_logical:
+        x, y = entry[0], entry[1]
+        mons = entry[5]
+        for spec in mons:
+            active[spec[0]] = (x, y)
+
+    if set(plan) != set(active):
+        return False
+    for connector, (px, py, pmode) in plan.items():
+        if active[connector] != (px, py):
+            return False
+        if cur_modes.get(connector) != pmode:
+            return False
+    for connector, mode in cur_modes.items():
+        if connector not in plan and mode is not None:
+            return False
+    return True
+
+
+def main():
+    p = proxy()
+
+    for attempt in range(3):
+        serial, monitors, current_logical, _ = get_current_state(p)
+        logicals, log_lines = build_plan(monitors)
+        if not logicals:
+            print("fixdisplays: no monitors detected", file=sys.stderr)
+            return 1
+
+        for line in log_lines:
+            print(f"fixdisplays: {line}", file=sys.stderr)
+
+        cur_modes = current_mode_ids(monitors)
+        if matches_current(logicals, current_logical, cur_modes):
+            print("fixdisplays: already applied", file=sys.stderr)
+            return 0
+
+        hist = load_history()
+        key = target_key(logicals)
+        now = int(time.time())
+        method, method_desc = choose_method(key, now, hist)
+        print(f"fixdisplays: applying {method_desc}", file=sys.stderr)
+
+        try:
+            apply(p, serial, logicals, method)
+            hist[key] = now
+            # Trim entries older than the window to keep the file small.
+            hist = {k: t for k, t in hist.items() if (now - t) <= CONFIRM_WINDOW_SEC}
+            save_history(hist)
+            return 0
+        except GLib.Error as e:
+            msg = str(e)
+            # Serial races when a hotplug fires during our call; retry.
+            if "serial" in msg.lower() or "AccessDenied" in msg:
+                print(f"fixdisplays: retry ({msg})", file=sys.stderr)
+                time.sleep(0.5)
+                continue
+            print(f"fixdisplays: apply failed: {msg}", file=sys.stderr)
+            return 2
+
+    print("fixdisplays: gave up after retries", file=sys.stderr)
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

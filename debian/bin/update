@@ -80,45 +80,45 @@ main() {
     fi
 
     echo "Checking for latest release..."
-    latest_version=$(curl -sL "https://api.github.com/repos/$gp_repo/releases/latest" | grep -oP '"tag_name": *"\K[^"]+')
+    local release_json
+    release_json=$(curl -fsSL "https://api.github.com/repos/$gp_repo/releases/latest" 2>/dev/null)
+    latest_version=$(echo "$release_json" | grep -oP '"tag_name": *"\K[^"]+' | head -1)
 
     if [ -z "$latest_version" ]; then
         print_error "Failed to fetch latest version from GitHub"
     elif [ -z "$current_version" ] || [ "v$current_version" != "$latest_version" ]; then
         echo "Latest version: $latest_version"
-        echo "Downloading GlobalProtect-openconnect..."
 
-        local temp_dir=$(mktemp -d)
-        cd "$temp_dir" || return 1
+        # The upstream filename pattern drifts across releases (e.g. the "-1"
+        # suffix in 2.6.5-1_amd64.deb). Extract the actual asset URL from the
+        # release JSON instead of hardcoding a filename.
+        local deb_url
+        deb_url=$(echo "$release_json" | grep -oP '"browser_download_url": *"\K[^"]+' \
+                  | grep -E '_amd64\.deb$' | head -1)
 
-        local base_url="https://github.com/$gp_repo/releases/download/$latest_version"
-        local deb_files=(
-            "globalprotect-openconnect_${latest_version#v}_amd64.deb"
-        )
+        if [ -z "$deb_url" ]; then
+            print_error "No amd64 .deb asset found in $latest_version release"
+        else
+            echo "Downloading $(basename "$deb_url")..."
 
-        local download_failed=false
-        for deb in "${deb_files[@]}"; do
-            if curl -sLO "$base_url/$deb"; then
+            local temp_dir=$(mktemp -d)
+            cd "$temp_dir" || return 1
+
+            if curl -fsSLO "$deb_url"; then
+                local deb=$(basename "$deb_url")
                 echo "Downloaded: $deb"
-            else
-                print_error "Failed to download: $deb"
-                download_failed=true
-            fi
-        done
-
-        if [ "$download_failed" = false ]; then
-            for deb in *.deb; do
-                if [ -f "$deb" ]; then
-                    sudo apt install -y "$deb" || {
-                        print_error "Failed to install $deb"
-                    }
+                if sudo apt install -y "./$deb"; then
+                    print_success "GlobalProtect-openconnect updated to $latest_version"
+                else
+                    print_error "Failed to install $deb"
                 fi
-            done
-            print_success "GlobalProtect-openconnect updated to $latest_version"
-        fi
+            else
+                print_error "Failed to download: $deb_url"
+            fi
 
-        cd - > /dev/null
-        rm -rf "$temp_dir"
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+        fi
     else
         print_success "GlobalProtect-openconnect is up to date ($latest_version)"
     fi

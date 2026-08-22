@@ -59,30 +59,44 @@ main() {
     fi
 
     echo "Checking for latest release..."
-    latest_version=$(curl -sL "https://api.github.com/repos/$gp_repo/releases/latest" | grep -oP '"tag_name": *"\K[^"]+')
+    local release_json
+    release_json=$(curl -fsSL "https://api.github.com/repos/$gp_repo/releases/latest" 2>/dev/null)
+    latest_version=$(echo "$release_json" | grep -oP '"tag_name": *"\K[^"]+' | head -1)
 
     if [ -z "$latest_version" ]; then
         print_error "Failed to fetch latest version from GitHub"
     elif [ -z "$current_version" ] || [ "v$current_version" != "$latest_version" ]; then
         echo "Latest version: $latest_version"
-        echo "Downloading GlobalProtect-openconnect..."
 
-        local temp_dir=$(mktemp -d)
-        cd "$temp_dir" || return 1
+        # Filename pattern drifts across releases; read the asset URL from
+        # the API instead of hardcoding.
+        local rpm_url
+        rpm_url=$(echo "$release_json" | grep -oP '"browser_download_url": *"\K[^"]+' \
+                  | grep -E '\.x86_64\.rpm$' | grep -v 'src\.rpm' | head -1)
 
-        local base_url="https://github.com/$gp_repo/releases/download/$latest_version"
-        local rpm="globalprotect-openconnect-${latest_version#v}-1.x86_64.rpm"
-
-        if curl -sLO "$base_url/$rpm"; then
-            echo "Downloaded: $rpm"
-            sudo dnf install -y "./$rpm" && print_success "GlobalProtect-openconnect updated to $latest_version" || \
-                print_error "Failed to install $rpm"
+        if [ -z "$rpm_url" ]; then
+            print_error "No x86_64 .rpm asset found in $latest_version release"
         else
-            print_error "Failed to download: $rpm"
-        fi
+            echo "Downloading $(basename "$rpm_url")..."
 
-        cd - > /dev/null
-        rm -rf "$temp_dir"
+            local temp_dir=$(mktemp -d)
+            cd "$temp_dir" || return 1
+
+            if curl -fsSLO "$rpm_url"; then
+                local rpm=$(basename "$rpm_url")
+                echo "Downloaded: $rpm"
+                if sudo dnf install -y "./$rpm"; then
+                    print_success "GlobalProtect-openconnect updated to $latest_version"
+                else
+                    print_error "Failed to install $rpm"
+                fi
+            else
+                print_error "Failed to download: $rpm_url"
+            fi
+
+            cd - > /dev/null
+            rm -rf "$temp_dir"
+        fi
     else
         print_success "GlobalProtect-openconnect is up to date ($latest_version)"
     fi

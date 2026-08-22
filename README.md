@@ -21,26 +21,27 @@ fedora/                dnf-based hosts
   provision.sh         Docker CE, VS Code, prerequisites
   bin/update           dnf upgrade + local .rpm + GlobalProtect + Zoom
 
-install.sh             OS-aware: runs provision.sh, then symlinks scripts
+install.sh             OS-aware: runs provision.sh, then copies scripts
                        into ~/.local/bin and units into ~/.config/systemd/user
 ```
 
 ## Install
 
 ```sh
-git clone <this repo> ~/dev/workstation
-cd ~/dev/workstation
+git clone <this repo> </path/to/checkout>
+cd </path/to/checkout>
 ./install.sh                     # needs sudo
 ```
 
 The installer detects Debian vs Fedora via `/etc/os-release`, runs the
 matching `provision.sh` (installs Docker CE, VS Code, and prerequisites via
-the official upstream repos), then links `common/` + the per-OS `bin/` and
-systemd units into `~/.local/bin` and `~/.config/systemd/user`.
+the official upstream repos), then **copies** `common/` + the per-OS `bin/`
+and systemd units into `~/.local/bin` and `~/.config/systemd/user`.
 
-Everything is a symlink so repo edits are live. Every step is idempotent —
-already-installed packages, existing apt/dnf sources, and correct symlinks
-are all no-ops. Re-running is always safe.
+Files are copied rather than symlinked so the repo can live anywhere and be
+moved or deleted after install. To push local edits from the repo, re-run
+`./install.sh`. Every step is idempotent — already-installed packages,
+existing apt/dnf sources, and up-to-date destination files are all no-ops.
 
 **What provisioning installs**
 
@@ -78,5 +79,5 @@ journalctl --user -u fixdisplays -f    # live log
 ## Adding a new OS
 
 1. Create `<osname>/bin/` and drop OS-specific scripts in there.
-2. Add the OS's ID to `detect_os()` in `install.sh` and to `check_deps()` if
-   the package names differ.
+2. Add a `<osname>/provision.sh` for system-package setup.
+3. Add the OS's ID to `detect_os()` in `install.sh`.

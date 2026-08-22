@@ -2,12 +2,15 @@
 # Install workstation tooling on a fresh Debian- or Fedora-based GNOME system.
 #
 # Runs the OS-specific provision.sh (installs Docker, VS Code, prerequisites)
-# then symlinks scripts into ~/.local/bin and systemd units into
-# ~/.config/systemd/user, and enables the fixdisplays service. Everything is
-# symlinked so edits in the repo are live.
+# then copies scripts into ~/.local/bin and systemd units into
+# ~/.config/systemd/user, and enables the fixdisplays service.
 #
-# Provisioning and symlinking are both idempotent — steps that are already
-# done are skipped, so this is safe to re-run at any time.
+# Everything is COPIED, not symlinked, so the repo can live anywhere and can
+# be moved or deleted after install. To push local edits from the repo,
+# re-run this script.
+#
+# Every step is idempotent — already-installed packages, existing apt/dnf
+# sources, and up-to-date destination files are all no-ops.
 #
 # Layout:
 #   common/            shared across all machines (fixdisplays, service)
@@ -39,31 +42,47 @@ detect_os() {
     esac
 }
 
-link() {
-    local src="$1" dst="$2"
+install_file() {
+    # install_file <src> <dst> [mode]
+    #   - If dst is a stale symlink or differs from src, back it up first.
+    #   - No-op when src and dst already have identical content.
+    local src="$1" dst="$2" mode="${3:-preserve}"
     mkdir -p "$(dirname "$dst")"
-    if [[ -L "$dst" && "$(readlink -f "$dst" || true)" == "$(readlink -f "$src")" ]]; then
-        ok "$dst -> $src (already linked)"
-        return
-    fi
-    if [[ -e "$dst" || -L "$dst" ]]; then
+
+    if [[ -L "$dst" ]]; then
         local backup="$dst.bak.$(date +%Y%m%d-%H%M%S)"
         mv "$dst" "$backup"
-        warn "moved existing $dst -> $backup"
+        warn "replaced symlink $dst (backup: $backup)"
     fi
-    ln -s "$src" "$dst"
-    ok "linked $dst -> $src"
+
+    if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+        ok "$dst (up to date)"
+        return
+    fi
+
+    if [[ -f "$dst" ]]; then
+        local backup="$dst.bak.$(date +%Y%m%d-%H%M%S)"
+        cp -a "$dst" "$backup"
+        warn "backed up $dst -> $backup"
+    fi
+
+    if [[ "$mode" == "preserve" ]]; then
+        install -m "$(stat -c '%a' "$src")" "$src" "$dst"
+    else
+        install -m "$mode" "$src" "$dst"
+    fi
+    ok "installed $dst"
 }
 
-link_dir() {
-    # link_dir <src_dir> <dst_dir> — link each regular file inside src_dir.
+install_dir() {
+    # install_dir <src_dir> <dst_dir> — copy each regular file into place.
     local src_dir="$1" dst_dir="$2"
     [[ -d "$src_dir" ]] || return 0
     shopt -s nullglob
     local any=0
     for f in "$src_dir"/*; do
         [[ -f "$f" ]] || continue
-        link "$f" "$dst_dir/$(basename "$f")"
+        install_file "$f" "$dst_dir/$(basename "$f")"
         any=1
     done
     shopt -u nullglob
@@ -85,23 +104,25 @@ main() {
 
     provision "$os"
 
-    say "linking common scripts into $BIN_DST"
-    link_dir "$REPO_DIR/common/bin" "$BIN_DST"
+    say "installing common scripts into $BIN_DST"
+    install_dir "$REPO_DIR/common/bin" "$BIN_DST"
 
-    say "linking $os scripts into $BIN_DST"
-    link_dir "$REPO_DIR/$os/bin" "$BIN_DST"
+    say "installing $os scripts into $BIN_DST"
+    install_dir "$REPO_DIR/$os/bin" "$BIN_DST"
 
-    say "linking common systemd user units into $UNIT_DST"
-    link_dir "$REPO_DIR/common/systemd/user" "$UNIT_DST"
+    say "installing common systemd user units into $UNIT_DST"
+    install_dir "$REPO_DIR/common/systemd/user" "$UNIT_DST"
 
     if [[ -d "$REPO_DIR/$os/systemd/user" ]]; then
-        say "linking $os systemd user units into $UNIT_DST"
-        link_dir "$REPO_DIR/$os/systemd/user" "$UNIT_DST"
+        say "installing $os systemd user units into $UNIT_DST"
+        install_dir "$REPO_DIR/$os/systemd/user" "$UNIT_DST"
     fi
 
     say "enabling fixdisplays.service"
     systemctl --user daemon-reload
     systemctl --user enable --now fixdisplays.service
+    # Restart to pick up any script changes we just installed.
+    systemctl --user restart fixdisplays.service
     ok "service active"
 
     printf '\n%sDone.%s Ensure %s%s%s is on your PATH.\n' \

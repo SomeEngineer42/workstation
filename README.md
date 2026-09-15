@@ -12,6 +12,8 @@ common/                shared across all machines
     fixdisplays-watch  runs fixdisplays on Mutter MonitorsChanged
   systemd/user/
     fixdisplays.service
+  applications/
+    kill-chat-apps.desktop  dash button that pkills Discord and Zoom
 
 debian/                apt-based hosts
   provision.sh         Docker CE, VS Code, prerequisites
@@ -22,7 +24,10 @@ fedora/                dnf-based hosts
   bin/update           dnf upgrade + local .rpm + GlobalProtect + Zoom
 
 install.sh             OS-aware: runs provision.sh, then copies scripts
-                       into ~/.local/bin and units into ~/.config/systemd/user
+                       into ~/.local/bin, desktop entries into
+                       ~/.local/share/applications, and units into
+                       ~/.config/systemd/user. Idempotently pins the
+                       kill-chat-apps entry to the GNOME dash.
 ```
 
 ## Install

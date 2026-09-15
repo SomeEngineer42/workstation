@@ -2,7 +2,8 @@
 # Install workstation tooling on a fresh Debian- or Fedora-based GNOME system.
 #
 # Runs the OS-specific provision.sh (installs Docker, VS Code, prerequisites)
-# then copies scripts into ~/.local/bin and systemd units into
+# then copies scripts into ~/.local/bin, desktop entries into
+# ~/.local/share/applications, and systemd units into
 # ~/.config/systemd/user, and enables the fixdisplays service.
 #
 # Everything is COPIED, not symlinked, so the repo can live anywhere and can
@@ -13,7 +14,8 @@
 # sources, and up-to-date destination files are all no-ops.
 #
 # Layout:
-#   common/            shared across all machines (fixdisplays, service)
+#   common/            shared across all machines (fixdisplays, service,
+#                      dash desktop entries)
 #   debian/            Debian/Ubuntu-only (provision, update)
 #   fedora/            Fedora-only (provision, update)
 
@@ -22,6 +24,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DST="$HOME/.local/bin"
 UNIT_DST="$HOME/.config/systemd/user"
+APPS_DST="$HOME/.local/share/applications"
 
 BOLD=$'\e[1m'; DIM=$'\e[2m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; RED=$'\e[31m'; RESET=$'\e[0m'
 say()  { printf '%s==>%s %s\n' "$BOLD" "$RESET" "$1"; }
@@ -97,6 +100,31 @@ provision() {
     "$script"
 }
 
+pin_to_dash() {
+    # pin_to_dash <desktop-file-basename> — append entry to
+    # org.gnome.shell.favorite-apps if missing. Leaves order alone otherwise
+    # so the user can drag pins around without us clobbering it.
+    local entry="$1"
+    if ! command -v gsettings >/dev/null; then
+        warn "gsettings not found; skipping dash pin for $entry"
+        return
+    fi
+    local current
+    current="$(gsettings get org.gnome.shell favorite-apps 2>/dev/null || echo '[]')"
+    if [[ "$current" == *"'$entry'"* ]]; then
+        ok "dash favorite $entry (already pinned)"
+        return
+    fi
+    local updated
+    if [[ "$current" == "[]" || "$current" == "@as []" ]]; then
+        updated="['$entry']"
+    else
+        updated="${current%]}, '$entry']"
+    fi
+    gsettings set org.gnome.shell favorite-apps "$updated"
+    ok "pinned $entry to dash"
+}
+
 main() {
     local os
     os="$(detect_os)"
@@ -109,6 +137,10 @@ main() {
 
     say "installing $os scripts into $BIN_DST"
     install_dir "$REPO_DIR/$os/bin" "$BIN_DST"
+
+    say "installing common desktop entries into $APPS_DST"
+    install_dir "$REPO_DIR/common/applications" "$APPS_DST"
+    pin_to_dash "kill-chat-apps.desktop"
 
     say "installing common systemd user units into $UNIT_DST"
     install_dir "$REPO_DIR/common/systemd/user" "$UNIT_DST"

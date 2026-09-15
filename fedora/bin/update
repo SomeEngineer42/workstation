@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+#
+# ─────────────────────────────────────────────────────────────
+# Source: https://github.com/SomeEngineer42/workstation
+#   Path in repo:  fedora/bin/update
+#   Installed to:  ~/.local/bin/update  (a copy, not a symlink)
+#
+# If you're reading this on the machine and want to change it,
+# edit the file in the workstation repo and re-run install.sh.
+# Do not edit the installed copy directly — install.sh will
+# overwrite it on the next run.
+# ─────────────────────────────────────────────────────────────
 
 # Fedora system update script
 # Handles: dnf upgrade, local .rpm installs, GlobalProtect updates, Zoom, cleanup
@@ -82,7 +93,7 @@ main() {
             local temp_dir=$(mktemp -d)
             cd "$temp_dir" || return 1
 
-            if curl -fsSLO "$rpm_url"; then
+            if curl -fsSLO --retry 3 --retry-all-errors --retry-delay 2 "$rpm_url"; then
                 local rpm=$(basename "$rpm_url")
                 echo "Downloaded: $rpm"
                 if sudo dnf install -y "./$rpm"; then
@@ -116,7 +127,7 @@ main() {
     fi
 
     echo "Checking for latest release..."
-    zoom_latest=$(curl -sL "https://zoom.us/rest/download?os=linux" | jq -r '.result.downloadVO.zoom.version' 2>/dev/null)
+    zoom_latest=$(curl -fsSL "https://zoom.us/rest/download?os=linux" | jq -r '.result.downloadVO.zoom.version')
 
     if [ -z "$zoom_latest" ] || [ "$zoom_latest" = "null" ]; then
         print_error "Failed to fetch latest version from Zoom API"
@@ -127,10 +138,14 @@ main() {
         local temp_dir=$(mktemp -d)
         cd "$temp_dir" || return 1
 
-        if curl -sLO "https://zoom.us/client/latest/zoom_x86_64.rpm"; then
+        if curl -fsSLO --retry 3 --retry-all-errors --retry-delay 2 "https://zoom.us/client/latest/zoom_x86_64.rpm"; then
             echo "Downloaded: zoom_x86_64.rpm"
-            sudo dnf install -y ./zoom_x86_64.rpm && print_success "Zoom updated to $zoom_latest" || \
-                print_error "Failed to install Zoom"
+            if ! rpm -qip ./zoom_x86_64.rpm >/dev/null 2>&1; then
+                print_error "Downloaded file is not a valid .rpm"
+            else
+                sudo dnf install -y ./zoom_x86_64.rpm && print_success "Zoom updated to $zoom_latest" || \
+                    print_error "Failed to install Zoom"
+            fi
         else
             print_error "Failed to download Zoom"
         fi

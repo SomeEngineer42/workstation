@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+#
+# ─────────────────────────────────────────────────────────────
+# Source: https://github.com/SomeEngineer42/workstation
+#   Path in repo:  common/bin/fixdisplays-watch
+#   Installed to:  ~/.local/bin/fixdisplays-watch  (a copy, not a symlink)
+#
+# If you're reading this on the machine and want to change it,
+# edit the file in the workstation repo and re-run install.sh.
+# Do not edit the installed copy directly — install.sh will
+# overwrite it on the next run.
+# ─────────────────────────────────────────────────────────────
 """Listen for Mutter MonitorsChanged and run fixdisplays with a short debounce."""
 
 import os

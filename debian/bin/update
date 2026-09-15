@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
+#
+# ─────────────────────────────────────────────────────────────
+# Source: https://github.com/SomeEngineer42/workstation
+#   Path in repo:  debian/bin/update
+#   Installed to:  ~/.local/bin/update  (a copy, not a symlink)
+#
+# If you're reading this on the machine and want to change it,
+# edit the file in the workstation repo and re-run install.sh.
+# Do not edit the installed copy directly — install.sh will
+# overwrite it on the next run.
+# ─────────────────────────────────────────────────────────────
 
 # System update script with GlobalProtect-openconnect support
-# Handles: apt update/upgrade, local .deb installs, GlobalProtect updates, cleanup
+# Handles: apt update/upgrade, local .deb installs, GlobalProtect,
+# Zoom, Discord, cleanup
 
 set -o pipefail
 
@@ -104,7 +116,7 @@ main() {
             local temp_dir=$(mktemp -d)
             cd "$temp_dir" || return 1
 
-            if curl -fsSLO "$deb_url"; then
+            if curl -fsSLO --retry 3 --retry-all-errors --retry-delay 2 "$deb_url"; then
                 local deb=$(basename "$deb_url")
                 echo "Downloaded: $deb"
                 if sudo apt install -y "./$deb"; then
@@ -138,9 +150,9 @@ main() {
     fi
 
     echo "Checking for latest release..."
-    zoom_latest=$(curl -sL "https://zoom.us/rest/download?os=linux" | docker run --rm -i ghcr.io/jqlang/jq -r '.result.downloadVO.zoom.version' 2>/dev/null)
+    zoom_latest=$(curl -fsSL "https://zoom.us/rest/download?os=linux" | jq -r '.result.downloadVO.zoom.version')
 
-    if [ -z "$zoom_latest" ]; then
+    if [ -z "$zoom_latest" ] || [ "$zoom_latest" = "null" ]; then
         print_error "Failed to fetch latest version from Zoom API"
     elif [ -z "$zoom_current" ] || [ "$zoom_current" != "$zoom_latest" ]; then
         echo "Latest version: $zoom_latest"
@@ -149,13 +161,17 @@ main() {
         local temp_dir=$(mktemp -d)
         cd "$temp_dir" || return 1
 
-        if curl -sLO "https://zoom.us/client/latest/zoom_amd64.deb"; then
+        if curl -fsSLO --retry 3 --retry-all-errors --retry-delay 2 "https://zoom.us/client/latest/zoom_amd64.deb"; then
             echo "Downloaded: zoom_amd64.deb"
-            sudo apt install -y ./zoom_amd64.deb && {
-                print_success "Zoom updated to $zoom_latest"
-            } || {
-                print_error "Failed to install Zoom"
-            }
+            if ! dpkg-deb --info ./zoom_amd64.deb >/dev/null 2>&1; then
+                print_error "Downloaded file is not a valid .deb"
+            else
+                sudo apt install -y ./zoom_amd64.deb && {
+                    print_success "Zoom updated to $zoom_latest"
+                } || {
+                    print_error "Failed to install Zoom"
+                }
+            fi
         else
             print_error "Failed to download Zoom"
         fi
@@ -178,9 +194,9 @@ main() {
     fi
 
     echo "Checking for latest release..."
-    discord_latest=$(curl -sL "https://discord.com/api/updates/stable?platform=linux" | docker run --rm -i ghcr.io/jqlang/jq -r '.name' 2>/dev/null)
+    discord_latest=$(curl -fsSL "https://discord.com/api/updates/stable?platform=linux" | jq -r '.name')
 
-    if [ -z "$discord_latest" ]; then
+    if [ -z "$discord_latest" ] || [ "$discord_latest" = "null" ]; then
         print_error "Failed to fetch latest version from Discord API"
     elif [ -z "$discord_current" ] || [ "$discord_current" != "$discord_latest" ]; then
         echo "Latest version: $discord_latest"
@@ -190,13 +206,17 @@ main() {
         cd "$temp_dir" || return 1
 
         local discord_deb="discord-${discord_latest}.deb"
-        if curl -sL "https://discord.com/api/download?platform=linux&format=deb" -o "$discord_deb"; then
+        if curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "https://discord.com/api/download?platform=linux&format=deb" -o "$discord_deb"; then
             echo "Downloaded: $discord_deb"
-            sudo apt install -y "./$discord_deb" && {
-                print_success "Discord updated to $discord_latest"
-            } || {
-                print_error "Failed to install Discord"
-            }
+            if ! dpkg-deb --info "$discord_deb" >/dev/null 2>&1; then
+                print_error "Downloaded file is not a valid .deb"
+            else
+                sudo apt install -y "./$discord_deb" && {
+                    print_success "Discord updated to $discord_latest"
+                } || {
+                    print_error "Failed to install Discord"
+                }
+            fi
         else
             print_error "Failed to download Discord"
         fi

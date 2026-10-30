@@ -14,16 +14,20 @@ common/                shared across all machines
     fixdisplays.service
   applications/
     kill-chat-apps.desktop  dash button that pkills Discord and Zoom
+  sysctl.d/
+    60-inotify.conf    raise inotify watch limits (IDEs + Obsidian ENOSPC)
 
 debian/                apt-based hosts
-  provision.sh         Docker CE, VS Code, prerequisites
+  provision.sh         backports kernel, CLI tooling, Docker CE, VS Code,
+                       Claude Desktop, Chrome, Beyond Compare, apt/journal caps
   bin/update           apt upgrade + local .deb + GlobalProtect + Zoom + Discord
 
 fedora/                dnf-based hosts
   provision.sh         Docker CE, VS Code, prerequisites
   bin/update           dnf upgrade + local .rpm + GlobalProtect + Zoom
 
-install.sh             OS-aware: runs provision.sh, then copies scripts
+install.sh             OS-aware: runs provision.sh, installs and applies
+                       sysctl drop-ins into /etc/sysctl.d, then copies scripts
                        into ~/.local/bin, desktop entries into
                        ~/.local/share/applications, and units into
                        ~/.config/systemd/user. Idempotently pins the
@@ -53,6 +57,16 @@ existing apt/dnf sources, and up-to-date destination files are all no-ops.
 - Prerequisites: `curl`, `jq`, `git`, `python3`, python GObject bindings
 - Docker CE (docker.com repo) + compose plugin; adds `$USER` to `docker` group
 - VS Code (Microsoft repo)
+- Debian only: kernel and headers from `<codename>-backports`; CLI and build
+  tooling; Claude Desktop, Chrome, and Beyond Compare from their vendor repos;
+  apt no longer keeps downloaded `.deb`s and the journal is capped at 500M.
+  Every package is marked manual so `update`'s `apt autoremove` can't take it.
+  Zoom, Discord, and GlobalProtect have no apt repo — run `update` afterwards
+  to install them.
+- inotify limits raised to 524288 watches / 1024 instances, so IDEs don't
+  starve Obsidian and other file watchers (`ENOSPC: System limit for number
+  of file watchers reached`). Installed to `/etc/sysctl.d/` and applied
+  immediately; Debian 13+ ignores `/etc/sysctl.conf`.
 
 ## What `fixdisplays` does
 

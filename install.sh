@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install workstation tooling on a fresh Debian- or Fedora-based GNOME system.
 #
-# Runs the OS-specific provision.sh (installs Docker, VS Code, prerequisites)
+# Runs the OS-specific provision.sh (installs Docker, VS Code, prerequisites),
+# installs and applies sysctl drop-ins into /etc/sysctl.d,
 # then copies scripts into ~/.local/bin, desktop entries into
 # ~/.local/share/applications, and systemd units into
 # ~/.config/systemd/user, and enables the fixdisplays service.
@@ -15,7 +16,7 @@
 #
 # Layout:
 #   common/            shared across all machines (fixdisplays, service,
-#                      dash desktop entries)
+#                      dash desktop entries, sysctl drop-ins)
 #   debian/            Debian/Ubuntu-only (provision, update)
 #   fedora/            Fedora-only (provision, update)
 
@@ -92,6 +93,25 @@ install_dir() {
     (( any )) || warn "no files in $src_dir"
 }
 
+install_sysctl() {
+    # install_sysctl <src_dir> — copy *.conf into /etc/sysctl.d and apply
+    # each one that changed, so no reboot is needed.
+    local src_dir="$1"
+    [[ -d "$src_dir" ]] || return 0
+    shopt -s nullglob
+    for f in "$src_dir"/*.conf; do
+        local dst="/etc/sysctl.d/$(basename "$f")"
+        if [[ -f "$dst" ]] && cmp -s "$f" "$dst"; then
+            ok "$dst (up to date)"
+            continue
+        fi
+        sudo install -m 0644 "$f" "$dst"
+        sudo sysctl -q -p "$dst"
+        ok "installed and applied $dst"
+    done
+    shopt -u nullglob
+}
+
 provision() {
     local os="$1"
     local script="$REPO_DIR/$os/provision.sh"
@@ -131,6 +151,9 @@ main() {
     say "detected OS: $os"
 
     provision "$os"
+
+    say "installing common sysctl settings into /etc/sysctl.d"
+    install_sysctl "$REPO_DIR/common/sysctl.d"
 
     say "installing common scripts into $BIN_DST"
     install_dir "$REPO_DIR/common/bin" "$BIN_DST"

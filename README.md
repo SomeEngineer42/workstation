@@ -83,10 +83,11 @@ first time each key prompts.
 - writes `~/.config/environment.d/10-ssh-auth-sock.conf` pointing
   `SSH_AUTH_SOCK` at `$XDG_RUNTIME_DIR/gcr/ssh`
 
-Run `ssh-agent-check` with no arguments to diagnose. It also warns when
-Cursor or VS Code was started with a different agent, which shows up as
-`Permission denied (publickey)` inside devcontainers; restart the editor.
-Don't start `ssh-agent` or `gnome-keyring-daemon` by hand.
+Run `ssh-agent-check` with no arguments to diagnose. Apps launched from the
+desktop keep the agent GNOME Shell had at login, even when restarted, which
+shows up as `Permission denied (publickey)` inside devcontainers. Until the
+next login, `--fix` stops the empty OpenSSH agent and links its socket path
+to GCR's. Don't start `ssh-agent` or `gnome-keyring-daemon` by hand.
 
 ## What `fixdisplays` does
 

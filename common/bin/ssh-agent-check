@@ -22,9 +22,9 @@
 #   ssh-agent-check          report problems, exit 1 if any
 #   ssh-agent-check --fix    repair them (idempotent)
 #
-# Already-running programs keep the SSH_AUTH_SOCK they started with; editors
-# that forward the agent into devcontainers (Cursor, VS Code) must be
-# restarted after a fix to forward the right one.
+# Programs keep the SSH_AUTH_SOCK they started with, and apps launched from
+# the desktop get gnome-shell's login-time value even when restarted. --fix
+# links the old OpenSSH socket path to gcr so they work until the next login.
 
 set -uo pipefail
 
@@ -154,18 +154,36 @@ check_runtime() {
         fi
     fi
 
-    # Editors that forward the agent into devcontainers but started before the
-    # switch; the usual cause of "Permission denied (publickey)" in a
-    # container. Everything else in the session picks it up at next login.
+    # Apps launched from the desktop inherit gnome-shell's environment, which
+    # is fixed at login, so after switching agents they keep the old
+    # OpenSSH socket path even when restarted. Until the next login, point
+    # that path at gcr so they (and devcontainers they forward to) work.
+    local old_sock="$RUNTIME_DIR/openssh_agent"
+    if [[ -S "$old_sock" && ! -L "$old_sock" ]] && [[ "$(unit_state ssh-agent.socket)" == masked* ]]; then
+        if (( FIX )); then
+            systemctl --user stop ssh-agent.service ssh-agent.socket
+            # ssh-agent.socket's ExecStopPre unsets SSH_AUTH_SOCK.
+            systemctl --user set-environment SSH_AUTH_SOCK="$GCR_SOCK"
+            rm -f "$old_sock"
+            ln -s "$GCR_SOCK" "$old_sock"
+            fixed "linked $old_sock -> $GCR_SOCK until next login"
+        else
+            bad "$old_sock is still the OpenSSH agent; apps started this login use it"
+        fi
+    fi
+
+    # Editors that forward the agent into devcontainers; a stale agent here
+    # is the usual cause of "Permission denied (publickey)" in a container.
     local pid sock name stale=()
     for pid in $(pgrep -u "$(id -u)" -x 'cursor|code|code-insiders|codium'); do
         sock="$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null | sed -n 's/^SSH_AUTH_SOCK=//p')"
         [[ -n "$sock" && "$sock" == "$RUNTIME_DIR"/* && "$sock" != "$GCR_SOCK" ]] || continue
+        [[ "$(readlink "$sock")" == "$GCR_SOCK" ]] && continue
         name="$(cat "/proc/$pid/comm") ($sock)"
         [[ " ${stale[*]} " == *" $name "* ]] || stale+=("$name")
     done
     if (( ${#stale[@]} )); then
-        warn "restart these so devcontainers forward the gcr agent: ${stale[*]}"
+        warn "using a different agent until you log out and back in: ${stale[*]}"
     fi
 }
 

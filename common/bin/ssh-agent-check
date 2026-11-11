@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+#
+# ─────────────────────────────────────────────────────────────
+# Source: https://github.com/SomeEngineer42/workstation
+#   Path in repo:  common/bin/ssh-agent-check
+#   Installed to:  ~/.local/bin/ssh-agent-check  (a copy, not a symlink)
+#
+# If you're reading this on the machine and want to change it,
+# edit the file in the workstation repo and re-run install.sh.
+# Do not edit the installed copy directly — install.sh will
+# overwrite it on the next run.
+# ─────────────────────────────────────────────────────────────
+
+# Make GCR's ssh-agent (gcr-ssh-agent) the only SSH agent in the session.
+#
+# GCR unlocks passphrase-protected keys with passphrases saved in the login
+# keyring, which PAM unlocks at login, so keys work after a reboot without
+# ssh-add. OpenSSH's own socket-activated agent (Debian ships ssh-agent.socket)
+# starts empty every login and races GCR to set SSH_AUTH_SOCK, so it's masked.
+#
+# Usage:
+#   ssh-agent-check          report problems, exit 1 if any
+#   ssh-agent-check --fix    repair them (idempotent)
+#
+# Already-running programs keep the SSH_AUTH_SOCK they started with; editors
+# that forward the agent into devcontainers (Cursor, VS Code) must be
+# restarted after a fix to forward the right one.
+
+set -uo pipefail
+
+BOLD=$'\e[1m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; RED=$'\e[31m'; RESET=$'\e[0m'
+ok()    { printf '%s ok%s   %s\n' "$GREEN" "$RESET" "$1"; }
+warn()  { printf '%s warn%s %s\n' "$YELLOW" "$RESET" "$1"; }
+bad()   { printf '%s fail%s %s\n' "$RED" "$RESET" "$1"; PROBLEMS=$((PROBLEMS + 1)); }
+fixed() { printf '%s fix%s  %s\n' "$BOLD" "$RESET" "$1"; }
+
+FIX=0
+case "${1:-}" in
+    --fix) FIX=1 ;;
+    "") ;;
+    *) echo "usage: $(basename "$0") [--fix]" >&2; exit 2 ;;
+esac
+
+PROBLEMS=0
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+GCR_SOCK="$RUNTIME_DIR/gcr/ssh"
+ENV_FILE="$HOME/.config/environment.d/10-ssh-auth-sock.conf"
+ENV_LINE='SSH_AUTH_SOCK=${XDG_RUNTIME_DIR}/gcr/ssh'
+CHANGED=0
+
+unit_exists() {
+    [[ -n "$(systemctl --user list-unit-files --no-legend "$1" 2>/dev/null)" ]]
+}
+
+unit_state() {
+    systemctl --user is-enabled "$1" 2>/dev/null || true
+}
+
+check_gcr_units() {
+    if ! unit_exists gcr-ssh-agent.socket; then
+        bad "gcr-ssh-agent.socket not installed (Debian: gcr4, Fedora: gcr)"
+        return
+    fi
+    local unit state
+    for unit in gcr-ssh-agent.socket gcr-ssh-agent.service; do
+        state="$(unit_state "$unit")"
+        if [[ "$state" == masked* ]]; then
+            if (( FIX )); then
+                systemctl --user unmask "$unit" >/dev/null
+                fixed "unmasked $unit"; CHANGED=1
+            else
+                bad "$unit is masked"
+            fi
+        fi
+    done
+    state="$(unit_state gcr-ssh-agent.socket)"
+    if [[ "$state" == enabled* || "$state" == static ]]; then
+        ok "gcr-ssh-agent.socket $state"
+    elif (( FIX )); then
+        systemctl --user enable gcr-ssh-agent.socket >/dev/null 2>&1
+        fixed "enabled gcr-ssh-agent.socket"; CHANGED=1
+    else
+        bad "gcr-ssh-agent.socket is ${state:-disabled}"
+    fi
+}
+
+check_openssh_units() {
+    local unit state
+    for unit in ssh-agent.socket ssh-agent.service; do
+        unit_exists "$unit" || continue
+        state="$(unit_state "$unit")"
+        if [[ "$state" == masked* ]]; then
+            ok "$unit masked"
+        elif (( FIX )); then
+            # Mask, not disable: Debian enables ssh-agent.socket globally, so
+            # a per-user disable doesn't stick. Don't stop a running agent;
+            # programs started this session may still be using it.
+            systemctl --user mask "$unit" >/dev/null 2>&1
+            fixed "masked $unit (competing OpenSSH agent)"; CHANGED=1
+        else
+            bad "$unit is $state; it competes with GCR for SSH_AUTH_SOCK"
+        fi
+    done
+}
+
+check_env_file() {
+    if [[ -f "$ENV_FILE" ]] && [[ "$(cat "$ENV_FILE")" == "$ENV_LINE" ]]; then
+        ok "$ENV_FILE"
+    elif (( FIX )); then
+        mkdir -p "$(dirname "$ENV_FILE")"
+        printf '%s\n' "$ENV_LINE" > "$ENV_FILE"
+        fixed "wrote $ENV_FILE"; CHANGED=1
+    else
+        bad "$ENV_FILE missing or not pointing at gcr"
+    fi
+}
+
+check_runtime() {
+    # Only meaningful inside a running user session.
+    systemctl --user show-environment >/dev/null 2>&1 || {
+        warn "no systemd user session; skipping runtime checks"
+        return
+    }
+    (( CHANGED )) && systemctl --user daemon-reload
+
+    if ! systemctl --user is-active -q gcr-ssh-agent.socket; then
+        if (( FIX )); then
+            systemctl --user start gcr-ssh-agent.socket
+            fixed "started gcr-ssh-agent.socket"
+        else
+            bad "gcr-ssh-agent.socket not active"
+        fi
+    fi
+
+    local session_sock
+    session_sock="$(systemctl --user show-environment | sed -n 's/^SSH_AUTH_SOCK=//p')"
+    if [[ "$session_sock" == "$GCR_SOCK" ]]; then
+        ok "session SSH_AUTH_SOCK=$GCR_SOCK"
+    elif (( FIX )); then
+        systemctl --user set-environment SSH_AUTH_SOCK="$GCR_SOCK"
+        dbus-update-activation-environment --systemd SSH_AUTH_SOCK="$GCR_SOCK" 2>/dev/null || true
+        fixed "session SSH_AUTH_SOCK -> $GCR_SOCK (was ${session_sock:-unset})"
+    else
+        bad "session SSH_AUTH_SOCK=${session_sock:-unset}, expected $GCR_SOCK"
+    fi
+
+    if [[ -S "$GCR_SOCK" ]]; then
+        local keys
+        keys="$(SSH_AUTH_SOCK="$GCR_SOCK" ssh-add -l 2>/dev/null | grep -c . || true)"
+        if (( keys > 0 )); then
+            ok "gcr agent has $keys key(s)"
+        else
+            warn "gcr agent lists no keys (none in ~/.ssh?)"
+        fi
+    fi
+
+    # Editors that forward the agent into devcontainers but started before the
+    # switch; the usual cause of "Permission denied (publickey)" in a
+    # container. Everything else in the session picks it up at next login.
+    local pid sock name stale=()
+    for pid in $(pgrep -u "$(id -u)" -x 'cursor|code|code-insiders|codium'); do
+        sock="$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null | sed -n 's/^SSH_AUTH_SOCK=//p')"
+        [[ -n "$sock" && "$sock" == "$RUNTIME_DIR"/* && "$sock" != "$GCR_SOCK" ]] || continue
+        name="$(cat "/proc/$pid/comm") ($sock)"
+        [[ " ${stale[*]} " == *" $name "* ]] || stale+=("$name")
+    done
+    if (( ${#stale[@]} )); then
+        warn "restart these so devcontainers forward the gcr agent: ${stale[*]}"
+    fi
+}
+
+check_gcr_units
+check_openssh_units
+check_env_file
+check_runtime
+
+if (( PROBLEMS )); then
+    printf '\n%s%d problem(s).%s Run %s --fix to repair.\n' "$RED" "$PROBLEMS" "$RESET" "$(basename "$0")"
+    exit 1
+fi

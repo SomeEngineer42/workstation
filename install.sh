@@ -5,7 +5,8 @@
 # installs and applies sysctl drop-ins into /etc/sysctl.d,
 # then copies scripts into ~/.local/bin, desktop entries into
 # ~/.local/share/applications, and systemd units into
-# ~/.config/systemd/user, and enables the fixdisplays service.
+# ~/.config/systemd/user, makes gcr-ssh-agent the only SSH agent, and enables
+# the fixdisplays service.
 #
 # Everything is COPIED, not symlinked, so the repo can live anywhere and can
 # be moved or deleted after install. To push local edits from the repo,
@@ -160,6 +161,9 @@ main() {
 
     say "installing $os scripts into $BIN_DST"
     install_dir "$REPO_DIR/$os/bin" "$BIN_DST"
+
+    say "making gcr-ssh-agent the only SSH agent"
+    "$BIN_DST/ssh-agent-check" --fix || warn "ssh agent setup incomplete; see above"
 
     say "installing common desktop entries into $APPS_DST"
     install_dir "$REPO_DIR/common/applications" "$APPS_DST"

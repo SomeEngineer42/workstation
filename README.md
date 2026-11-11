@@ -10,6 +10,7 @@ common/                shared across all machines
   bin/
     fixdisplays        best monitor layout via Mutter DBus (one-shot)
     fixdisplays-watch  runs fixdisplays on Mutter MonitorsChanged
+    ssh-agent-check    makes gcr-ssh-agent the only SSH agent (--fix)
   systemd/user/
     fixdisplays.service
   applications/
@@ -67,6 +68,25 @@ existing apt/dnf sources, and up-to-date destination files are all no-ops.
   starve Obsidian and other file watchers (`ENOSPC: System limit for number
   of file watchers reached`). Installed to `/etc/sysctl.d/` and applied
   immediately; Debian 13+ ignores `/etc/sysctl.conf`.
+
+## SSH agent
+
+`install.sh` runs `ssh-agent-check --fix` so GCR's agent (`gcr-ssh-agent`) is
+the only SSH agent. It unlocks passphrase-protected keys with passphrases
+saved in the login keyring, which PAM unlocks at login, so keys work after a
+reboot without `ssh-add`. Tick "automatically unlock when I log in" the
+first time each key prompts.
+
+- unmasks and enables `gcr-ssh-agent.socket`
+- masks OpenSSH's `ssh-agent.socket`/`.service` (Debian enables them
+  globally; they start empty and race GCR for `SSH_AUTH_SOCK`)
+- writes `~/.config/environment.d/10-ssh-auth-sock.conf` pointing
+  `SSH_AUTH_SOCK` at `$XDG_RUNTIME_DIR/gcr/ssh`
+
+Run `ssh-agent-check` with no arguments to diagnose. It also warns when
+Cursor or VS Code was started with a different agent, which shows up as
+`Permission denied (publickey)` inside devcontainers; restart the editor.
+Don't start `ssh-agent` or `gnome-keyring-daemon` by hand.
 
 ## What `fixdisplays` does
 
